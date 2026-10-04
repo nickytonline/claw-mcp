@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-TypeScript template for building [Model Context Protocol (MCP)](https://modelcontextprotocol.io) servers over HTTP.
+claw-mcp: a remote [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server over HTTP that wraps OpenClaw's stdio MCP bridge (`openclaw mcp serve`) and serves the OpenClaw agent workspace read-only. Started from [mcp-typescript-template](https://github.com/nickytonline/mcp-typescript-template), whose history it keeps; the template's `echo` tools remain only as the default factory for the HTTP app tests.
 
 ## Key Commands
 
@@ -139,16 +139,6 @@ See the `create-mcp-tool` skill (`.agents/skills/create-mcp-tool`) for the full 
 - Cover new tools, transports, config logic, schema adapters, and the HTTP app with focused tests
 - Use `async/await` for all async tests
 - Write a failing test that reproduces a bug before fixing it
-
-## Using This Template
-
-To build your own MCP server from this template:
-
-1. Update `package.json` (name, description, version). `name` and `version` are the MCP server identity unless `SERVER_NAME` or `SERVER_VERSION` is set
-2. Add/replace env vars in `src/config.ts`
-3. Replace the `echo` / `elicit_echo` tools in `src/tools.ts` with your tools
-4. Add business logic under `src/`
-5. Update `README.md` and this `AGENTS.md` to reflect your project
 
 ## Commit & PR Guidelines
 

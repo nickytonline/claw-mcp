@@ -1,4 +1,4 @@
-# Contributing to MCP TypeScript Template
+# Contributing to claw-mcp
 
 Thank you for your interest in contributing!
 

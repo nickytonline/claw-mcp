@@ -1,255 +1,94 @@
-# MCP TypeScript Template
+# claw-mcp
 
-A TypeScript template for building remote Model Context Protocol (MCP) servers with modern tooling and best practices while leveraging the [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk).
+A remote [Model Context Protocol](https://modelcontextprotocol.io) server that
+wraps [OpenClaw](https://www.npmjs.com/package/openclaw)'s stdio MCP bridge
+(`openclaw mcp serve`) and serves the OpenClaw agent workspace read-only, over
+stateless Streamable HTTP. It is meant to sit behind an identity-aware proxy
+such as [Pomerium](https://www.pomerium.com), which handles MCP OAuth and
+per-tool policy.
 
-## Features
+Started from [mcp-typescript-template](https://github.com/nickytonline/mcp-typescript-template);
+its history is kept here as the starting point.
 
-This template provides:
+## Tools
 
-- **TypeScript 7** - Native compiler with strict configuration; TypeScript 6 remains available for `typescript-eslint`'s compiler API
-- **Effect** - Typed configuration, validation, logging, error handling, and async workflows
-- **Vite** - Fast build system with ES modules output
-- **Express** - Fast, unopinionated web framework for HTTP server
-- **ESLint + Prettier** - Code quality and formatting
-- **Docker** - Containerization support
-- **Example Tools** - `echo` and `elicit_echo` tools demonstrating tool implementation, structured output, annotations, and MCP elicitation
+| Tool | Source | What it does |
+|------|--------|--------------|
+| `workspace_list` | wrapper | List files in the agent workspace (skips `.git`, `node_modules`) |
+| `workspace_read` | wrapper | Read a text file, optionally a line range (max 1 MB, no binaries) |
+| `workspace_search` | wrapper | Line search across workspace files (substring or regex) |
+| `conversations_list`, `conversation_get` | bridge | Channel-routed OpenClaw conversations (Discord, Slack, Telegram...) |
+| `messages_read`, `attachments_fetch` | bridge | Transcript and attachments for a session key |
+| `events_poll`, `events_wait` | bridge | Live event queue since the bridge connected |
+| `messages_send` | bridge | Reply through a conversation's existing channel route |
+| `permissions_list_open`, `permissions_respond` | bridge | Pending exec/plugin approvals |
 
-## Getting Started
+Bridge conversation tools only cover sessions with a channel route (a channel
+plus a recipient). Web UI chats such as `agent:main:main` are not listed, but
+`messages_read` works on them by session key.
 
-The easiest way to get started is using `degit`:
+## How it works
 
-1. **Create a new project from this template**
+- **One shared bridge.** The HTTP side is stateless (MCP 2026-07-28: a fresh
+  server per request), but the bridge's event queue only exists while it stays
+  connected. So one `openclaw mcp serve` child is shared by all requests and
+  respawned lazily if it exits (`src/openclaw.ts`).
+- **Loopback + password.** A Gateway in `trusted-proxy` auth mode accepts only
+  proxy-forwarded identity, plus `gateway.auth.password` from loopback callers.
+  So the server runs in the Gateway's network namespace (a compose
+  `network_mode: service:<gateway>` sidecar) and the bridge dials
+  `ws://127.0.0.1:18789` with the password file.
+- **Workspace tools run in the wrapper itself** (`src/workspace.ts`), reading
+  a read-only mount of `~/.openclaw/workspace`. Paths are realpath-checked to
+  stay inside the root.
 
-   ```bash
-   npx degit nickytonline/mcp-typescript-template my-mcp-server
-   cd my-mcp-server
-   ```
+Future direction: one bridge per proxy-authenticated user rather than one
+shared bridge, so OpenClaw's own per-user scopes apply.
 
-2. **Install dependencies**
+## Running
 
-   ```bash
-   npm install
-   ```
+Build `Dockerfile.openclaw` with `OPENCLAW_VERSION` matching the Gateway and
+`APP_UID` matching the Gateway's user (workspace files are mode 600):
 
-3. **Build the project**
-
-   ```bash
-   npm run build
-   ```
-
-4. **Start the server**
-   ```bash
-   npm start
-   ```
-
-The server will be available at `http://localhost:3000` for MCP connections.
-
-### Alternative: Using GitHub Template
-
-You can also click the "Use this template" button on GitHub to create a new repository, then clone it:
-
-```bash
-git clone <your-repo-url>
-cd my-mcp-server
-npm install
+```yaml
+clawmcp:
+  build:
+    context: ../claw-mcp
+    dockerfile: Dockerfile.openclaw
+    args: [OPENCLAW_VERSION=2026.9.8, APP_UID=1001]
+  environment:
+    OPENCLAW_GATEWAY_PASSWORD_FILE: /run/clawmcp/gateway-password
+    OPENCLAW_WORKSPACE_DIR: /workspace
+  volumes:
+    - ./gateway-password:/run/clawmcp/gateway-password:ro
+    - ./state:/home/clawmcp/.openclaw
+    - ./openclaw-home/.openclaw/workspace:/workspace:ro
+  network_mode: service:openclaw-gateway
 ```
+
+The MCP endpoint is `http://<gateway-host>:3000/mcp`; `GET /health` is a
+liveness check.
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | HTTP port |
+| `SERVER_NAME` / `SERVER_VERSION` | from `package.json` | MCP server identity |
+| `LOG_LEVEL` | `info` | `error` / `warn` / `info` / `debug` |
+| `OPENCLAW_BIN` | `openclaw` | CLI used to spawn `openclaw mcp serve` |
+| `OPENCLAW_GATEWAY_URL` | `ws://127.0.0.1:18789` | Gateway WebSocket (loopback for the password fallback) |
+| `OPENCLAW_GATEWAY_PASSWORD_FILE` | — | File holding `gateway.auth.password` |
+| `OPENCLAW_WORKSPACE_DIR` | — | Workspace to serve read-only; empty disables `workspace_*` |
+| `OPENCLAW_EXCLUDED_TOOLS` | — | Comma-separated bridge tools to hide and refuse; prefer proxy tool policy |
+| `OPENCLAW_CALL_TIMEOUT_MS` | `310000` | Per-call bridge timeout (`events_wait` can take 300s) |
 
 ## Development
 
-### Type checking
-
-`npm run typecheck` uses the TypeScript 7 compiler. The `typescript` package is an npm alias for the TypeScript 6 compatibility package because `typescript-eslint` still depends on TypeScript's legacy compiler API; the compatibility package is available as `tsc6` when needed.
-
-### Watch mode for development (with hot reloading)
-
 ```bash
-npm run dev
+npm install
+npm run dev        # watch mode (needs the openclaw CLI on PATH)
+npm run lint && npm run format:check && npm run build && npm run test:ci
 ```
 
-### Build the project
-
-```bash
-npm run build
-```
-
-### Linting
-
-- Lint the project
-
-```bash
-npm run lint
-```
-
-- Fix all auto-fixable lint errors
-
-```bash
-npm run lint:fix
-```
-
-### Formatting
-
-- Format files in the project
-
-```bash
-npm run format
-```
-
-- Check formatting
-
-```bash
-npm run format:check
-```
-
-## Testing Your MCP Server
-
-You can test your MCP server using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
-
-```bash
-npx @modelcontextprotocol/inspector
-```
-
-This will launch a web interface that allows you to:
-- Connect to your MCP server
-- Test your tools interactively
-- View request/response messages
-- Debug your MCP implementation
-
-Make sure your server is running (using `npm start` or `npm run dev`) before connecting with the inspector.
-
-## Available Tools
-
-The template includes two example tools:
-
-### echo
-
-Echoes back the provided message - a simple example to demonstrate MCP tool implementation.
-
-**Parameters:**
-
-- `message` (string) - The message to echo back
-
-### elicit_echo
-
-Demonstrates [MCP elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation): the tool takes no input, asks the connected client to prompt the user for a message, then echoes it back. Handles all three elicitation outcomes (accept, decline, cancel) and errors when the client doesn't support elicitation.
-
-Both tools declare an `outputSchema` and return `structuredContent` alongside the text result, and carry `annotations` (`readOnlyHint`, `idempotentHint`, `openWorldHint`) describing their safety profile.
-
-## Customizing Your MCP Server
-
-1. **Update package.json** - Change `name`, `version`, description, and keywords. The MCP server name and version are read from `name` and `version` unless `SERVER_NAME` or `SERVER_VERSION` is set
-2. **Modify src/tools.ts** - Replace the `echo` / `elicit_echo` tools with your custom tools
-3. **Add your logic** - Create additional TypeScript files for your business logic
-4. **Update README** - Document your specific MCP server functionality
-
-## Docker
-
-Build and run using Docker:
-
-- Build the Docker image
-
-```bash
-docker build -t my-mcp-server .
-```
-
-- Run the container
-
-```bash
-docker run -p 3000:3000 my-mcp-server
-```
-
-### Docker Compose
-
-A `docker-compose.yml` is included with a health check pre-configured:
-
-```bash
-docker compose up --build
-```
-
-## Project Structure
-
-```
-mcp-typescript-template/
-├── src/
-│   ├── app.ts            # Express app and MCP Node adapter wiring
-│   ├── app.test.ts       # HTTP boundary integration tests
-│   ├── index.ts          # Effect startup and shutdown
-│   ├── tools.ts          # Tool registration (registerTools) and logic
-│   ├── tools.test.ts     # Integration tests (in-memory client/server)
-│   ├── config.ts         # Env var loading and validation (Effect Config)
-│   ├── logger.ts         # Effect structured logging
-│   └── lib/
-│       ├── utils.ts      # MCP response helpers
-│       ├── mcp-schema.ts  # Effect Schema → MCP Standard Schema adapter
-│       ├── utils.test.ts # Unit tests
-│       └── mcp-schema.test.ts # Schema adapter and dialect tests
-├── dist/                 # Built output (generated)
-├── tsconfig.json         # TypeScript configuration
-├── vite.config.ts        # Vite build configuration
-├── eslint.config.js      # ESLint configuration
-├── Dockerfile            # Docker configuration
-└── package.json          # Dependencies and scripts
-```
-
-## Architecture
-
-This template follows a simple architecture:
-
-- **HTTP Transport** - Uses Express with `createMcpHandler` (`@modelcontextprotocol/server`) for remote MCP connections
-- **Stateless** - Per the MCP 2026-07-28 spec: no session handshake or session ID; the app creates a fresh server per request and supports older clients through the SDK fallback
-- **Tool Registration** - `registerTools(server)` in `src/tools.ts` is the single source of truth for tool wiring; `getServer()` and the tests both use it
-- **Typed I/O** - Effect Schema `inputSchema`/`outputSchema` values adapted to MCP Standard Schema, plus `structuredContent` for typed results
-- **JSON Schema Dialects** - The adapter supports both MCP-requested `draft-07` and `draft-2020-12` output
-- **Error Handling** - Genuine tool execution failures return `isError: true` via `createErrorResult` rather than being thrown; protocol, transport, and capability failures (e.g. an unsupported elicitation) can still reject the client call
-- **Health Check** - `GET /health` is a plain liveness endpoint (used by the Docker health check); `GET /mcp` is routed to the MCP handler itself
-
-## Example: Adding a New Tool
-
-Add the registration inside `registerTools()` in `src/tools.ts`. See the `create-mcp-tool` skill (`.agents/skills/create-mcp-tool`) for the full walkthrough.
-
-```typescript
-import type { CallToolResult, ServerContext } from "@modelcontextprotocol/server";
-import { Effect, Schema } from "effect";
-import { toMcpSchema } from "./lib/mcp-schema.ts";
-import { createTextResult, runMcpEffect } from "./lib/utils.ts";
-
-server.registerTool(
-  "my_tool",
-  {
-    title: "My Custom Tool",
-    description: "Description of what this tool does",
-    inputSchema: toMcpSchema(
-      Schema.Struct({
-        param1: Schema.String,
-        param2: Schema.optional(Schema.Number),
-      }),
-    ),
-    outputSchema: toMcpSchema(Schema.Struct({ output: Schema.String })),
-    annotations: { readOnlyHint: true, openWorldHint: false },
-  },
-  (args, ctx) => runMcpEffect(myTool(args, ctx)),
-);
-
-function myTool(
-  args: { param1: string; param2?: number },
-  _ctx: ServerContext,
-): Effect.Effect<CallToolResult> {
-  return Effect.succeed(createTextResult({ output: args.param1 }));
-}
-```
-
-Keep the tool workflow in `Effect` and use `runMcpEffect()` only where it crosses back into the MCP SDK callback API. For asynchronous work, use `Effect.tryPromise`; for independent parallel work, use `Effect.all` with explicit concurrency.
-
-## Why Express?
-
-This template uses Express for the HTTP server, which provides:
-
-- **MCP SDK Compatibility** - Full compatibility with `@modelcontextprotocol/server`'s `createMcpHandler`, adapted to Node/Express via `@modelcontextprotocol/node`'s `toNodeHandler`
-- **Mature & Stable** - Battle-tested HTTP server with extensive ecosystem
-- **TypeScript Support** - Excellent TypeScript support with comprehensive type definitions
-- **Middleware Ecosystem** - Rich ecosystem of middleware for common tasks
-- **Documentation** - Comprehensive documentation and community support
-- **Reliability** - Proven reliability for production applications
-
-## Repository Guidelines
-
-Contributors should review `AGENTS.md` for project structure, coding standards, and pull request expectations before opening changes.
+See `AGENTS.md` for project structure and conventions.
