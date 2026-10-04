@@ -41,7 +41,7 @@ src/
   app.test.ts    # HTTP boundary integration tests
   index.ts       # Effect startup and shutdown; runs the app on PORT with the OpenClaw proxy
   openclaw.ts    # Shared `openclaw mcp serve` stdio bridge + per-request proxy Server
-  workspace.ts   # Read-only workspace_list / workspace_read / workspace_search tools
+  workspace.ts   # Read-only workspace_list / workspace_read / workspace_search tools (Effect FileSystem)
   tools.ts       # registerTools() wiring + per-tool logic functions
   tools.test.ts  # colocated integration tests (in-memory client/server)
   config.ts      # Env var loading and validation via Effect Config
@@ -71,7 +71,7 @@ Config files (`vite.config.ts`, `tsconfig.json`, `eslint.config.js`, `Dockerfile
 
 ### Build System
 
-- Vite bundles to ES modules; `@modelcontextprotocol/server` and `@modelcontextprotocol/node` are external (not bundled)
+- Vite bundles to ES modules; runtime dependencies (`@modelcontextprotocol/*`, `@effect/platform*`, `express`, `effect`) are external (not bundled)
 - TypeScript 7 provides the `tsc` compiler; the `typescript` dependency is an npm alias for `@typescript/typescript6` so `typescript-eslint` can use its legacy compiler API, and exposes `tsc6` for compatibility checks
 - `@` path alias maps to `src/`
 - Node.js 24+ required (native TypeScript type stripping used in dev)

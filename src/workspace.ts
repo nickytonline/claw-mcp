@@ -1,7 +1,9 @@
-import { open, readdir, realpath, stat } from "node:fs/promises";
+import { FileSystem } from "@effect/platform";
+import type { PlatformError } from "@effect/platform/Error";
+import { NodeFileSystem } from "@effect/platform-node";
 import path from "node:path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
-import { Effect, JSONSchema, Schema } from "effect";
+import { Data, Effect, JSONSchema, Schema } from "effect";
 import { createErrorResult, createTextResult } from "./lib/utils.ts";
 
 /** Directories never listed or searched: VCS internals and dependency trees. */
@@ -11,178 +13,208 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_LIST_ENTRIES = 500;
 const MAX_MATCH_TEXT = 300;
 
-class WorkspaceError extends Error {}
+/** A refusal or bad input, reported to the caller as an isError result. */
+export class WorkspaceError extends Data.TaggedError("WorkspaceError")<{ message: string }> {}
+
+const refuse = (message: string) => Effect.fail(new WorkspaceError({ message }));
+
+/** A directory entry resolved to its real path and confirmed inside the root. */
+type Entry = { path: string; real: string; info: FileSystem.File.Info };
 
 /**
- * Read-only access to OpenClaw's agent workspace (`~/.openclaw/workspace`).
+ * Read-only access to OpenClaw's agent workspace (`~/.openclaw/workspace`)
+ * through Effect's `FileSystem` service.
  *
- * Every path is resolved through realpath and must stay inside the root, so
- * `..` segments and symlinks pointing elsewhere are both rejected.
+ * Every path, including each entry met while walking, is resolved through
+ * realPath and must stay inside the root. `FileSystem.stat` follows
+ * symlinks, so this is what stops a link from pointing list/search outside
+ * the workspace; walks also track visited real directories so a link back to
+ * an ancestor can't loop.
  */
 export class Workspace {
   readonly #root: string;
-  #realRoot: Promise<string> | undefined;
 
   constructor(root: string) {
     this.#root = root;
   }
 
-  #getRealRoot(): Promise<string> {
-    this.#realRoot ??= realpath(this.#root);
-    return this.#realRoot;
+  #realRoot = Effect.gen(this, function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.realPath(this.#root);
+  });
+
+  #isInside(root: string, real: string): boolean {
+    if (real !== root && !real.startsWith(root + path.sep)) return false;
+    return !path
+      .relative(root, real)
+      .split(path.sep)
+      .some((part) => SKIPPED_DIRS.has(part));
   }
 
-  /** Resolves a workspace-relative path to a real absolute path inside the root. */
-  async resolve(relative: string): Promise<string> {
-    if (path.isAbsolute(relative)) {
-      throw new WorkspaceError("Paths must be relative to the workspace root");
-    }
-    const root = await this.#getRealRoot();
-    let resolved: string;
-    try {
-      resolved = await realpath(path.resolve(root, relative));
-    } catch {
-      throw new WorkspaceError(`Not found: ${relative}`);
-    }
-    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-      throw new WorkspaceError(`Outside the workspace: ${relative}`);
-    }
-    if (path.relative(root, resolved).split(path.sep).some((part) => SKIPPED_DIRS.has(part))) {
-      throw new WorkspaceError(`Not accessible: ${relative}`);
-    }
-    return resolved;
+  /** Resolves a workspace-relative path to an entry inside the root. */
+  resolve(
+    relative: string,
+  ): Effect.Effect<Entry, WorkspaceError | PlatformError, FileSystem.FileSystem> {
+    return Effect.gen(this, function* () {
+      if (path.isAbsolute(relative)) {
+        return yield* refuse("Paths must be relative to the workspace root");
+      }
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* this.#realRoot;
+      const real = yield* fs
+        .realPath(path.resolve(root, relative))
+        .pipe(Effect.catchAll(() => refuse(`Not found: ${relative}`)));
+      if (real !== root && !real.startsWith(root + path.sep)) {
+        return yield* refuse(`Outside the workspace: ${relative}`);
+      }
+      if (!this.#isInside(root, real)) {
+        return yield* refuse(`Not accessible: ${relative}`);
+      }
+      const info = yield* fs.stat(real);
+      return { path: path.relative(root, real) || ".", real, info };
+    });
   }
 
-  async #toRelative(absolute: string): Promise<string> {
-    return path.relative(await this.#getRealRoot(), absolute) || ".";
+  /**
+   * Children of a directory, sorted by name. Entries that are broken links,
+   * point outside the root, or sit in a skipped directory are dropped.
+   */
+  #children(dir: Entry) {
+    return Effect.gen(this, function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* this.#realRoot;
+      const names = (yield* fs.readDirectory(dir.real)).sort((a, b) => a.localeCompare(b));
+      const children: Entry[] = [];
+      for (const name of names) {
+        if (SKIPPED_DIRS.has(name)) continue;
+        const real = yield* fs
+          .realPath(path.join(dir.real, name))
+          .pipe(Effect.option);
+        if (real._tag === "None" || !this.#isInside(root, real.value)) continue;
+        const info = yield* fs.stat(real.value).pipe(Effect.option);
+        if (info._tag === "None") continue;
+        const logical = dir.path === "." ? name : path.join(dir.path, name);
+        children.push({ path: logical, real: real.value, info: info.value });
+      }
+      return children;
+    });
   }
 
   /** Breadth-first listing, `depth` levels deep, capped at MAX_LIST_ENTRIES. */
-  async list(relative: string, depth: number) {
-    const start = await this.resolve(relative);
-    if (!(await stat(start)).isDirectory()) {
-      throw new WorkspaceError(`Not a directory: ${relative}`);
-    }
-    const entries: { path: string; type: "file" | "dir"; size?: number }[] = [];
-    let truncated = false;
-    let frontier = [start];
-    for (let level = 0; level < depth && frontier.length > 0 && !truncated; level++) {
-      const next: string[] = [];
-      for (const dir of frontier) {
-        const children = (await readdir(dir, { withFileTypes: true })).sort((a, b) =>
-          a.name.localeCompare(b.name),
-        );
-        for (const child of children) {
-          if (entries.length >= MAX_LIST_ENTRIES) {
-            truncated = true;
-            break;
+  list(relative: string, depth: number) {
+    return Effect.gen(this, function* () {
+      const start = yield* this.resolve(relative);
+      if (start.info.type !== "Directory") return yield* refuse(`Not a directory: ${relative}`);
+      const entries: { path: string; type: "file" | "dir"; size?: number }[] = [];
+      const visited = new Set([start.real]);
+      let truncated = false;
+      let frontier = [start];
+      for (let level = 0; level < depth && frontier.length > 0 && !truncated; level++) {
+        const next: Entry[] = [];
+        for (const dir of frontier) {
+          for (const child of yield* this.#children(dir)) {
+            if (entries.length >= MAX_LIST_ENTRIES) {
+              truncated = true;
+              break;
+            }
+            if (child.info.type === "Directory") {
+              entries.push({ path: child.path, type: "dir" });
+              if (!visited.has(child.real)) {
+                visited.add(child.real);
+                next.push(child);
+              }
+            } else if (child.info.type === "File") {
+              entries.push({ path: child.path, type: "file", size: Number(child.info.size) });
+            }
           }
-          const absolute = path.join(dir, child.name);
-          if (child.isDirectory()) {
-            if (SKIPPED_DIRS.has(child.name)) continue;
-            entries.push({ path: await this.#toRelative(absolute), type: "dir" });
-            next.push(absolute);
-          } else if (child.isFile()) {
-            const { size } = await stat(absolute);
-            entries.push({ path: await this.#toRelative(absolute), type: "file", size });
-          }
+          if (truncated) break;
         }
-        if (truncated) break;
+        frontier = next;
       }
-      frontier = next;
-    }
-    return { entries, truncated };
+      return { entries, truncated };
+    });
   }
 
   /** Reads a 1-based line range of a text file. */
-  async read(relative: string, startLine: number, maxLines: number) {
-    const file = await this.resolve(relative);
-    const text = await this.#readText(file, relative);
-    const lines = text.split("\n");
-    const from = Math.max(startLine, 1) - 1;
-    const slice = lines.slice(from, from + maxLines);
-    return {
-      path: await this.#toRelative(file),
-      startLine: from + 1,
-      endLine: from + slice.length,
-      totalLines: lines.length,
-      content: slice.join("\n"),
-    };
+  read(relative: string, startLine: number, maxLines: number) {
+    return Effect.gen(this, function* () {
+      const file = yield* this.resolve(relative);
+      const text = yield* this.#readText(file, relative);
+      const lines = text.split("\n");
+      const from = Math.max(startLine, 1) - 1;
+      const slice = lines.slice(from, from + maxLines);
+      return {
+        path: file.path,
+        startLine: from + 1,
+        endLine: from + slice.length,
+        totalLines: lines.length,
+        content: slice.join("\n"),
+      };
+    });
   }
 
   /** Line-by-line search across text files under `relative`. */
-  async search(
+  search(
     query: string,
     relative: string,
     options: { regex: boolean; caseSensitive: boolean; maxResults: number },
   ) {
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(
-        options.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-        options.caseSensitive ? "" : "i",
-      );
-    } catch (error) {
-      throw new WorkspaceError(`Invalid regex: ${(error as Error).message}`);
-    }
+    return Effect.gen(this, function* () {
+      const pattern = yield* Effect.try({
+        try: () =>
+          new RegExp(
+            options.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+            options.caseSensitive ? "" : "i",
+          ),
+        catch: (error) =>
+          new WorkspaceError({ message: `Invalid regex: ${(error as Error).message}` }),
+      });
 
-    const start = await this.resolve(relative);
-    const matches: { path: string; line: number; text: string }[] = [];
-    let truncated = false;
-    let filesSearched = 0;
+      const start = yield* this.resolve(relative);
+      const matches: { path: string; line: number; text: string }[] = [];
+      const visited = new Set<string>();
+      let truncated = false;
+      let filesSearched = 0;
+      const stack = [start];
 
-    const visit = async (absolute: string): Promise<void> => {
-      if (truncated) return;
-      const info = await stat(absolute);
-      if (info.isDirectory()) {
-        const children = (await readdir(absolute, { withFileTypes: true })).sort((a, b) =>
-          a.name.localeCompare(b.name),
-        );
-        for (const child of children) {
-          if (child.isDirectory() && SKIPPED_DIRS.has(child.name)) continue;
-          if (child.isDirectory() || child.isFile()) {
-            await visit(path.join(absolute, child.name));
+      // Depth-first, keeping name order: children are pushed in reverse.
+      while (stack.length > 0 && !truncated) {
+        const entry = stack.pop()!;
+        if (entry.info.type === "Directory") {
+          if (visited.has(entry.real)) continue;
+          visited.add(entry.real);
+          stack.push(...(yield* this.#children(entry)).reverse());
+          continue;
+        }
+        if (entry.info.type !== "File" || Number(entry.info.size) > MAX_FILE_BYTES) continue;
+        const text = yield* this.#readText(entry, entry.path).pipe(Effect.option);
+        if (text._tag === "None") continue;
+        filesSearched++;
+        const lines = text.value.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (!pattern.test(lines[i])) continue;
+          if (matches.length >= options.maxResults) {
+            truncated = true;
+            break;
           }
+          matches.push({ path: entry.path, line: i + 1, text: lines[i].slice(0, MAX_MATCH_TEXT) });
         }
-        return;
       }
-      if (!info.isFile() || info.size > MAX_FILE_BYTES) return;
-      const text = await this.#readText(absolute, absolute).catch(() => undefined);
-      if (text === undefined) return;
-      filesSearched++;
-      const lines = text.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (!pattern.test(lines[i])) continue;
-        if (matches.length >= options.maxResults) {
-          truncated = true;
-          return;
-        }
-        matches.push({
-          path: await this.#toRelative(absolute),
-          line: i + 1,
-          text: lines[i].slice(0, MAX_MATCH_TEXT),
-        });
-      }
-    };
-
-    await visit(start);
-    return { matches, filesSearched, truncated };
+      return { matches, filesSearched, truncated };
+    });
   }
 
-  async #readText(file: string, label: string): Promise<string> {
-    const info = await stat(file);
-    if (!info.isFile()) throw new WorkspaceError(`Not a file: ${label}`);
-    if (info.size > MAX_FILE_BYTES) {
-      throw new WorkspaceError(`File too large to read (${info.size} bytes): ${label}`);
-    }
-    const handle = await open(file, "r");
-    try {
-      const buffer = await handle.readFile();
-      if (buffer.includes(0)) throw new WorkspaceError(`Binary file: ${label}`);
-      return buffer.toString("utf8");
-    } finally {
-      await handle.close();
-    }
+  #readText(file: Entry, label: string) {
+    return Effect.gen(function* () {
+      if (file.info.type !== "File") return yield* refuse(`Not a file: ${label}`);
+      if (Number(file.info.size) > MAX_FILE_BYTES) {
+        return yield* refuse(`File too large to read (${file.info.size} bytes): ${label}`);
+      }
+      const fs = yield* FileSystem.FileSystem;
+      const bytes = yield* fs.readFile(file.real);
+      if (bytes.includes(0)) return yield* refuse(`Binary file: ${label}`);
+      return new TextDecoder().decode(bytes);
+    });
   }
 }
 
@@ -266,59 +298,61 @@ export function isWorkspaceTool(name: string): boolean {
   return workspaceToolNames.has(name);
 }
 
-function decode<A, I>(schema: Schema.Schema<A, I>, args: unknown): A {
-  try {
-    return Schema.decodeUnknownSync(schema)(args ?? {});
-  } catch (error) {
-    throw new WorkspaceError(
-      `Invalid arguments: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
+const decode = <A, I>(schema: Schema.Schema<A, I>, args: unknown) =>
+  Schema.decodeUnknown(schema)(args ?? {}).pipe(
+    Effect.mapError((error) => new WorkspaceError({ message: `Invalid arguments: ${error.message}` })),
+  );
 
-async function runWorkspaceTool(workspace: Workspace, name: string, args: unknown) {
+function runWorkspaceTool(workspace: Workspace, name: string, args: unknown) {
   switch (name) {
-    case "workspace_list": {
-      const input = decode(ListArgs, args);
-      return workspace.list(input.path ?? ".", input.depth ?? 2);
-    }
-    case "workspace_read": {
-      const input = decode(ReadArgs, args);
-      return workspace.read(input.path, input.start_line ?? 1, input.max_lines ?? 400);
-    }
-    case "workspace_search": {
-      const input = decode(SearchArgs, args);
-      return workspace.search(input.query, input.path ?? ".", {
-        regex: input.regex ?? false,
-        caseSensitive: input.case_sensitive ?? false,
-        maxResults: input.max_results ?? 100,
-      });
-    }
+    case "workspace_list":
+      return decode(ListArgs, args).pipe(
+        Effect.flatMap((input) => workspace.list(input.path ?? ".", input.depth ?? 2)),
+      );
+    case "workspace_read":
+      return decode(ReadArgs, args).pipe(
+        Effect.flatMap((input) =>
+          workspace.read(input.path, input.start_line ?? 1, input.max_lines ?? 400),
+        ),
+      );
+    case "workspace_search":
+      return decode(SearchArgs, args).pipe(
+        Effect.flatMap((input) =>
+          workspace.search(input.query, input.path ?? ".", {
+            regex: input.regex ?? false,
+            caseSensitive: input.case_sensitive ?? false,
+            maxResults: input.max_results ?? 100,
+          }),
+        ),
+      );
     default:
-      throw new WorkspaceError(`Unknown workspace tool: ${name}`);
+      return refuse(`Unknown workspace tool: ${name}`);
   }
 }
 
-/** Runs one workspace tool. Bad input and filesystem refusals come back as isError results. */
+/**
+ * Runs one workspace tool against the given FileSystem layer (Node's by
+ * default). Bad input, refusals and I/O failures come back as isError results.
+ */
 export function callWorkspaceTool(
   workspace: Workspace,
   name: string,
   args: unknown,
+  fileSystem = NodeFileSystem.layer,
 ): Effect.Effect<CallToolResult> {
-  return Effect.tryPromise({
-    try: () => runWorkspaceTool(workspace, name, args),
-    catch: (error) => error,
-  }).pipe(
+  return (runWorkspaceTool(workspace, name, args) as Effect.Effect<
+    unknown,
+    WorkspaceError | PlatformError,
+    FileSystem.FileSystem
+  >).pipe(
     Effect.map((data) => createTextResult(data)),
-    Effect.catchAll((error) =>
-      Effect.succeed(
-        createErrorResult({
-          error:
-            error instanceof WorkspaceError
-              ? error.message
-              : `Workspace error: ${error instanceof Error ? error.message : String(error)}`,
-        }),
-      ),
-    ),
+    Effect.catchTags({
+      WorkspaceError: (error) => Effect.succeed(createErrorResult({ error: error.message })),
+      SystemError: (error) =>
+        Effect.succeed(createErrorResult({ error: `Workspace error: ${error.message}` })),
+      BadArgument: (error) =>
+        Effect.succeed(createErrorResult({ error: `Workspace error: ${error.message}` })),
+    }),
+    Effect.provide(fileSystem),
   );
 }
