@@ -1,0 +1,43 @@
+# Remote MCP server that wraps OpenClaw's stdio bridge (`openclaw mcp serve`).
+#
+# Meant to run as a sidecar sharing the OpenClaw Gateway's network namespace
+# (compose `network_mode: service:openclaw-gateway`): a trusted-proxy Gateway
+# only accepts the password fallback from loopback, so the bridge has to dial
+# ws://127.0.0.1:18789. Pin OPENCLAW_VERSION to the Gateway's version.
+FROM node:24-slim AS build
+
+RUN apt-get update && apt-get install -y python3 make g++ git && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --prefer-offline
+
+COPY *.ts *.json ./
+COPY ./src/ ./src/
+
+RUN npm run build && npm prune --omit=dev
+
+FROM node:24-slim
+
+ARG OPENCLAW_VERSION=latest
+RUN npm install -g openclaw@${OPENCLAW_VERSION} && npm cache clean --force
+
+WORKDIR /app
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+
+# Run as a uid that can read the Gateway's workspace files (mode 600, owned
+# by the Gateway's user). Defaults to the image's `node` user.
+ARG APP_UID=1000
+RUN if [ "$APP_UID" != "1000" ]; then \
+      useradd --uid "$APP_UID" --user-group --create-home --home-dir /home/clawmcp clawmcp; \
+    fi
+
+ENV NODE_ENV=production
+USER ${APP_UID}
+
+EXPOSE 3000
+
+CMD ["node", "dist/index.js"]

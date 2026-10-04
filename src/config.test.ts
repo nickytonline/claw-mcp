@@ -33,6 +33,12 @@ describe("configuration", () => {
       SERVER_NAME: "from-package-json",
       SERVER_VERSION: "9.9.9",
       LOG_LEVEL: "info",
+      OPENCLAW_BIN: "openclaw",
+      OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:18789",
+      OPENCLAW_GATEWAY_PASSWORD_FILE: "",
+      OPENCLAW_EXCLUDED_TOOLS: [],
+      OPENCLAW_WORKSPACE_DIR: "",
+      OPENCLAW_CALL_TIMEOUT_MS: 310_000,
     });
   });
 
@@ -51,6 +57,12 @@ describe("configuration", () => {
       SERVER_NAME: "custom-server",
       SERVER_VERSION: "2.0.0",
       LOG_LEVEL: "debug",
+      OPENCLAW_BIN: "openclaw",
+      OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:18789",
+      OPENCLAW_GATEWAY_PASSWORD_FILE: "",
+      OPENCLAW_EXCLUDED_TOOLS: [],
+      OPENCLAW_WORKSPACE_DIR: "",
+      OPENCLAW_CALL_TIMEOUT_MS: 310_000,
     });
   });
 

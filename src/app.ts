@@ -1,5 +1,6 @@
 import express from "express";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import type { McpServerFactory } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { Effect } from "effect";
 import { logger } from "./logger.ts";
@@ -19,12 +20,15 @@ const getServer = () => {
   return server;
 };
 
-/** Creates the Express app and MCP handler used by the production entrypoint. */
-export function createApp() {
+/**
+ * Creates the Express app and MCP handler. The production entrypoint passes
+ * the OpenClaw proxy factory; tests use the default echo server.
+ */
+export function createApp(serverFactory: McpServerFactory = getServer) {
   // createMcpHandler runs the factory fresh per request (2026-07-28 spec: no
   // initialize/initialized handshake, no Mcp-Session-Id). It also answers
   // 2025-era clients automatically via a stateless per-request fallback.
-  const handler = createMcpHandler(getServer, {
+  const handler = createMcpHandler(serverFactory, {
     onerror: (error) => {
       void runMcpEffect(logger.error({ error: error.message }, "Error handling MCP request"));
     },

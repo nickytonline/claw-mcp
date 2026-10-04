@@ -39,7 +39,9 @@ npm run lint && npm run format:check && npm run build && npm run test:ci
 src/
   app.ts         # Express app and MCP Node adapter wiring
   app.test.ts    # HTTP boundary integration tests
-  index.ts       # Effect startup and shutdown; runs the app on PORT
+  index.ts       # Effect startup and shutdown; runs the app on PORT with the OpenClaw proxy
+  openclaw.ts    # Shared `openclaw mcp serve` stdio bridge + per-request proxy Server
+  workspace.ts   # Read-only workspace_list / workspace_read / workspace_search tools
   tools.ts       # registerTools() wiring + per-tool logic functions
   tools.test.ts  # colocated integration tests (in-memory client/server)
   config.ts      # Env var loading and validation via Effect Config
@@ -85,6 +87,12 @@ Defined and validated in `src/config.ts`:
 | `SERVER_NAME`    | `name` in `package.json`   | MCP server name                      |
 | `SERVER_VERSION` | `version` in `package.json` | MCP server version                   |
 | `LOG_LEVEL`      | `info`                     | `error` / `warn` / `info` / `debug`  |
+| `OPENCLAW_BIN`   | `openclaw`                 | OpenClaw CLI used to spawn `openclaw mcp serve` |
+| `OPENCLAW_GATEWAY_URL` | `ws://127.0.0.1:18789` | Gateway WebSocket; must be loopback for the password fallback in trusted-proxy mode |
+| `OPENCLAW_GATEWAY_PASSWORD_FILE` | — | File holding `gateway.auth.password` |
+| `OPENCLAW_EXCLUDED_TOOLS` | — (comma-separated) | Tools hidden and refused by the wrapper; prefer a Pomerium `mcp_tool` policy |
+| `OPENCLAW_WORKSPACE_DIR` | — | Agent workspace to serve read-only via `workspace_list`/`workspace_read`/`workspace_search`; empty disables them |
+| `OPENCLAW_CALL_TIMEOUT_MS` | `310000` | Per-call timeout to the bridge (`events_wait` can take 300s) |
 
 ## Coding Conventions
 

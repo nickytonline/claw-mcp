@@ -3,6 +3,12 @@ import { Effect } from "effect";
 import { logger } from "./logger.ts";
 import { getConfig } from "./config.ts";
 import { createApp } from "./app.ts";
+import {
+  closeBridge,
+  createOpenClawBridge,
+  createOpenClawProxyServer,
+  createWorkspace,
+} from "./openclaw.ts";
 import { runMcpEffect } from "./lib/utils.ts";
 
 /**
@@ -12,7 +18,9 @@ import { runMcpEffect } from "./lib/utils.ts";
  */
 const main = Effect.gen(function* () {
   const config = getConfig();
-  const { app, handler } = createApp();
+  const bridge = createOpenClawBridge();
+  const workspace = createWorkspace();
+  const { app, handler } = createApp(() => createOpenClawProxyServer(bridge, workspace));
 
   const httpServer = yield* Effect.async<HttpServer, unknown>((resume) => {
     const server = app.listen(config.PORT, () => {
@@ -39,6 +47,7 @@ const main = Effect.gen(function* () {
             catch: (error) => error,
           }),
           closeHttpServer,
+          closeBridge(bridge),
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid);
@@ -67,7 +76,7 @@ const main = Effect.gen(function* () {
       serverName: config.SERVER_NAME,
       version: config.SERVER_VERSION,
     },
-    `MCP TypeScript Template Server running on port ${config.PORT}`,
+    `OpenClaw remote MCP server running on port ${config.PORT}`,
   );
 
   yield* Effect.never;

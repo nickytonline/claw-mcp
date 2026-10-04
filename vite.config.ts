@@ -21,6 +21,6 @@ export default defineConfig(({ command }) => ({
     },
   },
   ssr: {
-    external: ["@modelcontextprotocol/server", "@modelcontextprotocol/node", "express", "effect"],
+    external: ["@modelcontextprotocol/server", "@modelcontextprotocol/client", "@modelcontextprotocol/node", "express", "effect"],
   },
 }));
